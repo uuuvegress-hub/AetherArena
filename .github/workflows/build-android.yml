@@ -31,11 +31,11 @@ jobs:
 
     steps:
 
-      # 1. Download repository
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Install Java 17
+      # 2. Install Java
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
@@ -43,8 +43,7 @@ jobs:
           java-version: "17"
 
       # 3. Install Linux dependencies
-      - name: Install dependencies
-        shell: bash
+      - name: Install Linux dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -52,22 +51,23 @@ jobs:
             wget \
             unzip \
             zip \
-            python3
+            python3 \
+            file
 
-      # 4. Find Android SDK
+      # 4. Locate Android SDK
       - name: Configure Android SDK
         shell: bash
         run: |
           set -euo pipefail
 
-          test -d "$ANDROID_HOME"
+          mkdir -p "$ANDROID_HOME"
 
           SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
             -type f -name sdkmanager -print -quit)"
 
           if [ -z "$SDKMANAGER" ]; then
-            echo "ERROR: Android SDK manager not found."
-            find "$ANDROID_HOME" -maxdepth 5 -type f | head -100
+            echo "ERROR: sdkmanager not found."
+            find /usr/local/lib/android -name sdkmanager
             exit 1
           fi
 
@@ -88,7 +88,7 @@ jobs:
             --licenses
           set -o pipefail
 
-      # 6. Install Android SDK
+      # 6. Install Android SDK components
       - name: Install Android SDK components
         shell: bash
         run: |
@@ -103,7 +103,7 @@ jobs:
             "ndk;23.2.8568313" \
             "cmake;3.10.2.4988404"
 
-          echo "Android SDK installation completed."
+          echo "Android SDK installed."
 
       # 7. Download Godot 4.3
       - name: Install Godot 4.3
@@ -130,7 +130,7 @@ jobs:
 
           godot --version
 
-      # 8. Install matching Godot export templates
+      # 8. Install Godot export templates
       - name: Install Godot export templates
         shell: bash
         run: |
@@ -143,33 +143,28 @@ jobs:
             -O templates.tpz
 
           mkdir -p extracted
-
           unzip -q templates.tpz -d extracted
 
           TEMPLATE_SOURCE="$RUNNER_TEMP/godot/extracted/templates"
-
           TEMPLATE_DEST="$HOME/.local/share/godot/export_templates/4.3.stable"
 
-          test -f "$TEMPLATE_SOURCE/android_debug.apk"
-
-          test -f "$TEMPLATE_SOURCE/android_release.apk"
+          test -s "$TEMPLATE_SOURCE/android_debug.apk"
 
           mkdir -p "$TEMPLATE_DEST"
-
           cp -a "$TEMPLATE_SOURCE/." "$TEMPLATE_DEST/"
 
-          echo "Installed Godot Android export templates."
+          test -s "$TEMPLATE_DEST/android_debug.apk"
 
-          ls -lh "$TEMPLATE_DEST/android_debug.apk"
+          echo "Godot Android templates installed."
 
-      # 9. Extract game project
+      # 9. Extract project
       - name: Extract Aether Arena project
         shell: bash
         run: |
           set -euo pipefail
 
           if [ ! -f "$PROJECT_ZIP" ]; then
-            echo "ERROR: Project ZIP not found."
+            echo "ERROR: Project ZIP is missing."
             ls -lah
             exit 1
           fi
@@ -183,7 +178,7 @@ jobs:
             -type f -name project.godot -print -quit)"
 
           if [ -z "$PROJECT_FILE" ]; then
-            echo "ERROR: project.godot not found in ZIP."
+            echo "ERROR: project.godot not found."
             find "$GITHUB_WORKSPACE/source" -maxdepth 5 -type f
             exit 1
           fi
@@ -193,16 +188,77 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
           echo "Project directory: $PROJECT_DIR"
+          ls -lah "$PROJECT_DIR"
 
-          test -f "$PROJECT_DIR/export_presets.cfg"
-
-      # 10. Configure Android preset
-      - name: Fix Android export preset
+      # 10. Fix Android texture import setting
+      - name: Fix ETC2 ASTC Android texture setting
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 - "$PROJECT_DIR/export_presets.cfg" <<'PY'
+          python3 - "$PROJECT_DIR/project.godot" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          content = path.read_text(encoding="utf-8")
+
+          key = "textures/vram_compression/import_etc2_astc"
+          setting = f"{key}=true"
+
+          match = re.search(
+              r"(?ms)^\[rendering\]\s*$.*?(?=^\[|\Z)",
+              content
+          )
+
+          if match:
+              section = match.group(0)
+
+              pattern = (
+                  r"^" + re.escape(key) + r"\s*=.*$"
+              )
+
+              if re.search(pattern, section, re.M):
+                  section = re.sub(
+                      pattern,
+                      setting,
+                      section,
+                      flags=re.M
+                  )
+              else:
+                  section = section.rstrip() + "\n" + setting + "\n"
+
+              content = (
+                  content[:match.start()]
+                  + section
+                  + content[match.end():]
+              )
+          else:
+              content = content.rstrip() + "\n\n[rendering]\n" + setting + "\n"
+
+          path.write_text(content, encoding="utf-8")
+
+          print("Enabled Android ETC2/ASTC texture import.")
+          PY
+
+          grep -n -A 15 '^\[rendering\]' \
+            "$PROJECT_DIR/project.godot"
+
+      # 11. Fix Android export preset
+      - name: Configure Android export preset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PRESET="$PROJECT_DIR/export_presets.cfg"
+
+          if [ ! -f "$PRESET" ]; then
+            echo "ERROR: export_presets.cfg missing."
+            exit 1
+          fi
+
+          python3 - "$PRESET" <<'PY'
           import re
           import sys
           from pathlib import Path
@@ -237,8 +293,7 @@ jobs:
 
           if android_index is None:
               raise SystemExit(
-                  "ERROR: No Android export preset exists "
-                  "in export_presets.cfg."
+                  "ERROR: Android preset not found."
               )
 
           options_header = (
@@ -258,8 +313,28 @@ jobs:
 
           options = sections[options_index]
 
-          # Use standard prebuilt Android templates.
-          # Do not use the custom Gradle build.
+          settings = {
+              "gradle_build/use_gradle_build": "false",
+          }
+
+          for key, value in settings.items():
+              pattern = (
+                  r"^" + re.escape(key) + r"\s*=.*$"
+              )
+
+              if re.search(pattern, options, re.M):
+                  options = re.sub(
+                      pattern,
+                      f"{key}={value}",
+                      options,
+                      flags=re.M
+                  )
+              else:
+                  options = options.rstrip() + (
+                      f"\n{key}={value}\n"
+                  )
+
+          # Remove custom Gradle SDK overrides.
           options = re.sub(
               r"^gradle_build/min_sdk\s*=.*\n?",
               "",
@@ -274,24 +349,6 @@ jobs:
               flags=re.M
           )
 
-          gradle_setting = (
-              "gradle_build/use_gradle_build=false"
-          )
-
-          if re.search(
-              r"^gradle_build/use_gradle_build\s*=.*$",
-              options,
-              re.M
-          ):
-              options = re.sub(
-                  r"^gradle_build/use_gradle_build\s*=.*$",
-                  gradle_setting,
-                  options,
-                  flags=re.M
-              )
-          else:
-              options += "\n" + gradle_setting + "\n"
-
           sections[options_index] = options
 
           path.write_text(
@@ -300,15 +357,12 @@ jobs:
           )
 
           print("Android preset index:", android_index)
-          print("Gradle Build: disabled")
-          print("Min SDK override: removed")
-          print("Target SDK override: removed")
+          print("Gradle custom build disabled.")
           PY
 
-          echo "Final Android export preset:"
-          cat "$PROJECT_DIR/export_presets.cfg"
+          cat "$PRESET"
 
-      # 11. Create debug keystore
+      # 12. Create debug keystore
       - name: Create Android debug keystore
         shell: bash
         run: |
@@ -324,11 +378,7 @@ jobs:
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/debug.keystore" >> "$GITHUB_ENV"
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> "$GITHUB_ENV"
-
-      # 12. Configure Godot SDK paths
+      # 13. Configure Godot Android paths
       - name: Configure Godot Android paths
         shell: bash
         run: |
@@ -342,12 +392,15 @@ jobs:
           [resource]
           export/android/android_sdk_path = "$ANDROID_HOME"
           export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$HOME/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
           EOF
 
-          echo "Godot SDK paths configured."
+          echo "Godot Android settings configured."
 
-      # 13. Import project
-      - name: Import Godot project
+      # 14. Import resources after fixing ETC2 ASTC
+      - name: Reimport project resources
         shell: bash
         run: |
           set -euo pipefail
@@ -356,29 +409,28 @@ jobs:
             --editor \
             --path "$PROJECT_DIR" \
             --import \
-            --verbose
+            --verbose \
+            2>&1 | tee "$GITHUB_WORKSPACE/import.log"
 
-      # 14. Verify export templates and preset
+          echo "Project import completed."
+
+      # 15. Verify Android configuration
       - name: Verify Android configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          TEMPLATE="$HOME/.local/share/godot/export_templates/4.3.stable"
-
-          test -s "$TEMPLATE/android_debug.apk"
-
-          test -s "$TEMPLATE/android_release.apk"
+          test -s "$HOME/.local/share/godot/export_templates/4.3.stable/android_debug.apk"
 
           grep -q 'platform="Android"' \
             "$PROJECT_DIR/export_presets.cfg"
 
-          grep -q 'gradle_build/use_gradle_build=false' \
-            "$PROJECT_DIR/export_presets.cfg"
+          grep -q 'import_etc2_astc=true' \
+            "$PROJECT_DIR/project.godot"
 
-          echo "Android configuration verified."
+          echo "Android template and texture settings verified."
 
-      # 15. Export APK with detailed logs
+      # 16. Export APK
       - name: Export Aether Arena APK
         shell: bash
         run: |
@@ -388,7 +440,9 @@ jobs:
 
           APK="$GITHUB_WORKSPACE/build/AetherArena.apk"
 
-          echo "Starting standard Android APK export."
+          echo "Starting Android export..."
+
+          set +e
 
           godot --headless \
             --verbose \
@@ -397,6 +451,17 @@ jobs:
             "$APK" \
             2>&1 | tee "$GITHUB_WORKSPACE/build/export.log"
 
+          EXPORT_STATUS=${PIPESTATUS[0]}
+
+          set -e
+
+          if [ "$EXPORT_STATUS" -ne 0 ]; then
+            echo "ERROR: Godot export failed."
+            echo "Last export log lines:"
+            tail -n 100 "$GITHUB_WORKSPACE/build/export.log"
+            exit "$EXPORT_STATUS"
+          fi
+
           if [ ! -s "$APK" ]; then
             echo "ERROR: APK was not generated."
             exit 1
@@ -404,11 +469,12 @@ jobs:
 
           unzip -t "$APK"
 
-          echo "APK export successful."
+          echo "APK generated successfully."
           ls -lh "$APK"
 
-      # 16. Upload APK
+      # 17. Upload APK
       - name: Upload Android APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: AetherArena-Android-APK
@@ -416,14 +482,16 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # 17. Upload diagnostic log if build fails
+      # 18. Upload diagnostics
       - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: AetherArena-Build-Diagnostics
           path: |
+            import.log
             build/export.log
+            source/**/project.godot
             source/**/export_presets.cfg
           if-no-files-found: ignore
           retention-days: 7
