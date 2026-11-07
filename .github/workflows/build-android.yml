@@ -4,174 +4,188 @@ name: Aether Arena - Android Build
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    paths:
+      - "AetherArena_Phone_Build.zip"
+      - ".github/workflows/build-android.yml"
 
 permissions:
   contents: read
 
+concurrency:
+  group: aether-arena-android
+  cancel-in-progress: true
+
 jobs:
-  build:
+  build-android:
+    name: Build Aether Arena APK
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     env:
+      GODOT_VERSION: "4.3"
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-      GODOT_VERSION: "4.3"
       PROJECT_ZIP: AetherArena_Phone_Build.zip
 
     steps:
+
       # 1. Download repository
-      - name: Checkout project
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Install Java 17
-      - name: Setup Java
-        uses: actions/setup-java@v5
+      # 2. Install Java
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # 3. Find Android SDK
-      - name: Configure Android SDK
+      # 3. Install required Linux packages
+      - name: Install Linux dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            wget \
+            unzip \
+            zip \
+            python3 \
+            p7zip-full
+
+      # 4. Locate Android SDK tools
+      - name: Locate Android SDK Manager
         shell: bash
         run: |
           set -euo pipefail
 
-          test -d "$ANDROID_HOME"
+          SDK_ROOT="$ANDROID_HOME"
+          mkdir -p "$SDK_ROOT"
 
-          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
-            -type f -name sdkmanager -print -quit)"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
+            -type f -name sdkmanager 2>/dev/null | head -n 1 || true)"
 
           if [ -z "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager not found"
+            echo "Android sdkmanager was not found."
+            echo "Searching standard runner locations..."
+
+            SDKMANAGER="$(find /usr/local/lib/android \
+              -type f -name sdkmanager 2>/dev/null | head -n 1 || true)"
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager is missing."
             exit 1
           fi
 
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
 
-          echo "Android SDK detected"
           "$SDKMANAGER" --version
-          java -version
 
-      # 4. Accept Android licenses
+      # 5. Accept Android licenses
       - name: Accept Android licenses
         shell: bash
         run: |
           set -euo pipefail
-          yes | "$SDKMANAGER" --licenses || true
 
-      # 5. Install Android components
-      - name: Install Android components
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses
+          set -o pipefail
+
+      # 6. Install Android SDK packages
+      - name: Install Android SDK
         shell: bash
         run: |
           set -euo pipefail
 
-          "$SDKMANAGER" --install \
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_HOME" \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0" \
+            "cmdline-tools;latest" \
             "ndk;23.2.8568313" \
             "cmake;3.10.2.4988404"
 
-          echo "Android components ready"
-
-      # 6. Download Godot
+      # 7. Download Godot 4.3
       - name: Install Godot 4.3
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/godot"
-          cd "$RUNNER_TEMP/godot"
+          GODOT_URL="https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip"
 
-          wget -q --show-progress \
-            "https://github.com/godotengine/godot-builds/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip"
+          wget -q --show-progress "$GODOT_URL" -O godot.zip
 
-          wget -q --show-progress \
-            "https://github.com/godotengine/godot-builds/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz"
+          mkdir -p godot-bin
+          unzip -q godot.zip -d godot-bin
 
-          unzip -q Godot_v4.3-stable_linux.x86_64.zip
+          GODOT_BIN="$(find godot-bin -type f \
+            -name 'Godot_v4.3-stable_linux.x86_64' | head -n 1)"
 
-          sudo install \
-            Godot_v4.3-stable_linux.x86_64 \
-            /usr/local/bin/godot
+          if [ -z "$GODOT_BIN" ]; then
+            echo "ERROR: Godot executable not found."
+            exit 1
+          fi
+
+          chmod +x "$GODOT_BIN"
+          sudo install -m 755 "$GODOT_BIN" /usr/local/bin/godot
 
           godot --version
 
-      # 7. Install export templates
-      - name: Install Godot export templates
+      # 8. Install matching Godot export templates
+      - name: Install Godot Export Templates
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$RUNNER_TEMP/godot"
+          TEMPLATE_URL="https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz"
 
-          mkdir extracted
+          wget -q --show-progress "$TEMPLATE_URL" -O templates.tpz
 
-          unzip -q \
-            Godot_v4.3-stable_export_templates.tpz \
-            -d extracted
+          mkdir -p template-temp
+          unzip -q templates.tpz -d template-temp
 
-          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/4.3.stable"
+          TEMPLATE_SOURCE="template-temp/templates"
 
-          mkdir -p "$TEMPLATE_DIR"
+          if [ ! -d "$TEMPLATE_SOURCE" ]; then
+            echo "ERROR: Export templates directory is missing."
+            find template-temp -maxdepth 3 -type f
+            exit 1
+          fi
 
-          cp -a extracted/templates/. "$TEMPLATE_DIR/"
+          TEMPLATE_DEST="$HOME/.local/share/godot/export_templates/4.3.stable"
 
-          test -f "$TEMPLATE_DIR/android_debug.apk"
+          mkdir -p "$TEMPLATE_DEST"
+          cp -a "$TEMPLATE_SOURCE/." "$TEMPLATE_DEST/"
 
-          echo "Godot Android templates ready"
+          echo "Godot export templates installed."
+          ls -lah "$TEMPLATE_DEST"
 
-      # 8. Configure signing
-      - name: Configure Android signing
+      # 9. Extract game project
+      - name: Extract Aether Arena project
         shell: bash
         run: |
           set -euo pipefail
 
-          keytool -genkeypair -noprompt \
-            -keystore "$HOME/debug.keystore" \
-            -storepass android \
-            -alias androiddebugkey \
-            -keypass android \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          if [ ! -f "$PROJECT_ZIP" ]; then
+            echo "ERROR: $PROJECT_ZIP is missing from repository root."
+            echo "Repository files:"
+            ls -lah
+            exit 1
+          fi
 
-          mkdir -p "$HOME/.config/godot"
+          mkdir -p "$GITHUB_WORKSPACE/source"
 
-          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
-          [gd_resource type="EditorSettings" format=3]
+          unzip -q "$PROJECT_ZIP" -d "$GITHUB_WORKSPACE/source"
 
-          [resource]
-          export/android/java_sdk_path = "$JAVA_HOME"
-          export/android/android_sdk_path = "$ANDROID_HOME"
-          export/android/debug_keystore = "$HOME/debug.keystore"
-          export/android/debug_keystore_user = "androiddebugkey"
-          export/android/debug_keystore_pass = "android"
-          EOF
-
-      # 9. Extract project
-      - name: Extract game project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f "$PROJECT_ZIP"
-
-          mkdir -p source
-
-          unzip -q "$PROJECT_ZIP" -d source
-
-          PROJECT_FILE="$(find source \
-            -name project.godot \
-            -type f -print -quit)"
+          PROJECT_FILE="$(find "$GITHUB_WORKSPACE/source" \
+            -type f -name project.godot | head -n 1 || true)"
 
           if [ -z "$PROJECT_FILE" ]; then
-            echo "ERROR: project.godot not found"
-            find source -maxdepth 5 -type f
+            echo "ERROR: project.godot was not found in the ZIP."
+            find "$GITHUB_WORKSPACE/source" -maxdepth 4 -type f
             exit 1
           fi
 
@@ -179,84 +193,155 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Project detected: $PROJECT_DIR"
+          echo "Found project:"
+          echo "$PROJECT_DIR"
 
-      # 10. Fix Android export preset
-      - name: Fix Android export settings
+          ls -lah "$PROJECT_DIR"
+
+      # 10. Configure Android export preset
+      - name: Configure Android export preset
         shell: bash
         run: |
           set -euo pipefail
 
           PRESET="$PROJECT_DIR/export_presets.cfg"
 
-          test -f "$PRESET"
+          if [ ! -f "$PRESET" ]; then
+            echo "ERROR: export_presets.cfg is missing."
+            exit 1
+          fi
 
           python3 - "$PRESET" <<'PY'
           import re
           import sys
+          from pathlib import Path
 
-          path = sys.argv[1]
+          path = Path(sys.argv[1])
+          content = path.read_text(encoding="utf-8")
 
-          with open(path, "r", encoding="utf-8") as f:
-              lines = f.readlines()
+          sections = re.split(r"(?=^\[)", content, flags=re.M)
 
-          sections = []
-          current = None
+          android_index = None
 
-          for i, line in enumerate(lines):
-              match = re.match(r'^\[([^\]]+)\]\s*$', line.strip())
-              if match:
-                  current = match.group(1)
-              if current == "preset.0.options":
-                  sections.append(i)
+          for i, section in enumerate(sections):
+              if not re.match(r"^\[preset\.\d+\]", section):
+                  continue
 
-          if not sections:
-              raise SystemExit(
-                  "ERROR: preset.0.options not found. "
-                  "Check Android preset index."
+              platform = re.search(
+                  r'^platform\s*=\s*"Android"\s*$',
+                  section,
+                  re.M
               )
 
-          start = sections[0]
-          end = len(lines)
+              name = re.search(
+                  r'^name\s*=\s*"Android"\s*$',
+                  section,
+                  re.M
+              )
 
-          for i in range(start + 1, len(lines)):
-              if re.match(r'^\[[^\]]+\]\s*$', lines[i].strip()):
-                  end = i
+              if platform or name:
+                  android_index = re.search(
+                      r"^\[preset\.(\d+)\]",
+                      section,
+                      re.M
+                  ).group(1)
                   break
 
-          options = {
+          if android_index is None:
+              raise SystemExit(
+                  "ERROR: Android export preset was not found."
+              )
+
+          target_section = f"[preset.{android_index}.options]"
+
+          for i, section in enumerate(sections):
+              if section.startswith(target_section):
+                  options = section
+                  break
+          else:
+              options = target_section + "\n"
+              sections.append(options)
+              i = len(sections) - 1
+
+          settings = {
               "gradle_build/use_gradle_build": "true",
               "gradle_build/min_sdk": "23",
               "gradle_build/target_sdk": "34",
           }
 
-          for key, value in options.items():
-              pattern = re.compile(
-                  r"^" + re.escape(key) + r"\s*=.*$"
-              )
+          for key, value in settings.items():
+              pattern = rf"^{re.escape(key)}\s*=.*$"
+              replacement = f"{key}={value}"
 
-              found = False
+              if re.search(pattern, options, re.M):
+                  options = re.sub(
+                      pattern,
+                      replacement,
+                      options,
+                      flags=re.M
+                  )
+              else:
+                  options += replacement + "\n"
 
-              for i in range(start + 1, end):
-                  if pattern.match(lines[i].strip()):
-                      lines[i] = f'{key}={value}\n'
-                      found = True
+          sections[i] = options
+          path.write_text("".join(sections), encoding="utf-8")
 
-              if not found:
-                  lines.insert(end, f'{key}={value}\n')
-                  end += 1
-
-          with open(path, "w", encoding="utf-8") as f:
-              f.writelines(lines)
-
-          print("Android export settings updated:")
-          for key, value in options.items():
-              print(f"{key} = {value}")
+          print("Android preset configured:")
+          print("\n".join(
+              f"{key}={value}"
+              for key, value in settings.items()
+          ))
           PY
 
-          cat "$PRESET"
+          echo "Android preset updated."
 
-      # 11. Import project
+      # 11. Create debug signing key
+      - name: Create Android debug keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.android"
+
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair \
+              -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/debug.keystore" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> "$GITHUB_ENV"
+
+      # 12. Configure Godot Android SDK paths
+      - name: Configure Godot Editor Settings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.config/godot"
+
+          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$HOME/.android/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+
+          echo "Godot Android paths configured."
+
+      # 13. Import project resources
       - name: Import Godot project
         shell: bash
         run: |
@@ -267,39 +352,31 @@ jobs:
             --path "$PROJECT_DIR" \
             --quit
 
-      # 12. Verify Android preset
-      - name: Verify export configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          grep -q 'name="Android"' \
-            "$PROJECT_DIR/export_presets.cfg"
-
-          grep -q 'gradle_build/use_gradle_build=true' \
-            "$PROJECT_DIR/export_presets.cfg"
-
-          echo "Android preset verified"
-
-      # 13. Build APK
-      - name: Export Aether Arena APK
+      # 14. Install Android Build Template and export APK
+      - name: Build Android APK
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p "$GITHUB_WORKSPACE/build"
 
+          echo "Installing Android build template and exporting..."
+
           godot --headless \
             --path "$PROJECT_DIR" \
+            --install-android-build-template \
             --export-debug "Android" \
             "$GITHUB_WORKSPACE/build/AetherArena.apk"
 
-          test -s "$GITHUB_WORKSPACE/build/AetherArena.apk"
+          if [ ! -s "$GITHUB_WORKSPACE/build/AetherArena.apk" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
 
-          echo "APK created successfully"
+          echo "APK generated successfully."
           ls -lh "$GITHUB_WORKSPACE/build/AetherArena.apk"
 
-      # 14. Upload APK
+      # 15. Upload APK artifact
       - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
