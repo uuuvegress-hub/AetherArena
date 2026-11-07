@@ -11,46 +11,82 @@ jobs:
   build:
     runs-on: ubuntu-24.04
 
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
     steps:
+      # 1. Download project
       - name: Download repository
         uses: actions/checkout@v4
 
+      # 2. Install Java 17
       - name: Install Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
+      # 3. Configure existing Android SDK
+      - name: Configure Android SDK
+        run: |
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
 
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          echo "Android SDK found"
+          java -version
+          sdkmanager --version
+
+      # 4. Install Android packages
       - name: Install Android components
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager --install \
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          yes | "$SDKMANAGER" --licenses || true
+
+          yes | "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0" \
-            "cmdline-tools;latest" \
-            "cmake;3.10.2.4988404" \
-            "ndk;23.2.8568313"
+            "ndk;23.2.8568313" \
+            "cmake;3.10.2.4988404"
 
-      - name: Install Godot 4.3 and export templates
+      # 5. Download Godot 4.3
+      - name: Install Godot 4.3
         run: |
           mkdir -p "$RUNNER_TEMP/godot"
           cd "$RUNNER_TEMP/godot"
 
-          wget -q https://github.com/godotengine/godot-builds/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
-          wget -q https://github.com/godotengine/godot-builds/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
+          wget -q \
+            https://github.com/godotengine/godot-builds/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
+
+          wget -q \
+            https://github.com/godotengine/godot-builds/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
 
           unzip -q Godot_v4.3-stable_linux.x86_64.zip
-          sudo install Godot_v4.3-stable_linux.x86_64 /usr/local/bin/godot
+
+          sudo install \
+            Godot_v4.3-stable_linux.x86_64 \
+            /usr/local/bin/godot
+
+          godot --version
+
+      # 6. Install Godot Android export templates
+      - name: Install Godot export templates
+        run: |
+          cd "$RUNNER_TEMP/godot"
+
+          mkdir extracted
+          unzip -q Godot_v4.3-stable_export_templates.tpz -d extracted
 
           mkdir -p "$HOME/.local/share/godot/export_templates/4.3.stable"
-          mkdir templates
-          unzip -q Godot_v4.3-stable_export_templates.tpz -d templates
-          cp -a templates/templates/. "$HOME/.local/share/godot/export_templates/4.3.stable/"
 
+          cp -a extracted/templates/. \
+            "$HOME/.local/share/godot/export_templates/4.3.stable/"
+
+      # 7. Configure Android signing
       - name: Configure Android signing
         run: |
           keytool -genkeypair \
@@ -76,34 +112,69 @@ jobs:
           export/android/debug_keystore_pass = "android"
           EOF
 
+      # 8. Extract game project
       - name: Extract game project
         run: |
           mkdir -p source
+
           unzip -q AetherArena_Phone_Build.zip -d source
 
-          PROJECT_FILE="$(find source -name project.godot -print -quit)"
+          PROJECT_FILE="$(find source -name project.godot -type f -print -quit)"
+
           if [ -z "$PROJECT_FILE" ]; then
-            echo "ERROR: project.godot was not found"
+            echo "ERROR: project.godot not found"
             find source -maxdepth 4 -type f
             exit 1
           fi
 
-          echo "PROJECT_DIR=$(dirname "$PROJECT_FILE")" >> "$GITHUB_ENV"
+          PROJECT_DIR="$(dirname "$PROJECT_FILE")"
 
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Game project found: $PROJECT_DIR"
+
+      # 9. Import project
       - name: Import Godot project
         run: |
-          godot --headless --editor --path "$PROJECT_DIR" --quit
+          godot --headless \
+            --editor \
+            --path "$PROJECT_DIR" \
+            --quit
 
+      # 10. Verify Android preset
+      - name: Verify Android export preset
+        run: |
+          if [ ! -f "$PROJECT_DIR/export_presets.cfg" ]; then
+            echo "ERROR: export_presets.cfg not found"
+            exit 1
+          fi
+
+          grep -q 'name="Android"' \
+            "$PROJECT_DIR/export_presets.cfg" || {
+              echo "ERROR: Android export preset not found"
+              exit 1
+            }
+
+          echo "Android preset found"
+
+      # 11. Export APK
       - name: Build Android APK
         run: |
           mkdir -p build
+
           godot --headless \
             --path "$PROJECT_DIR" \
             --export-debug "Android" \
             "$GITHUB_WORKSPACE/build/AetherArena.apk"
 
+          test -s build/AetherArena.apk
+
+          echo "APK successfully created"
+
+      # 12. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: AetherArena-Android-APK
           path: build/AetherArena.apk
+          if-no-files-found: error
