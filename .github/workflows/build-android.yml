@@ -1,0 +1,40 @@
+name: Build Aether Arena APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: barichello/godot-ci:4.3
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Extract game project
+        run: |
+          unzip -q AetherArena_Phone_Build.zip -d source
+          test -f source/AetherArena/project.godot
+
+      - name: Import Godot project
+        run: |
+          godot --headless --editor \
+            --path source/AetherArena --quit
+
+      - name: Build Android APK
+        run: |
+          mkdir -p build
+          godot --headless \
+            --path source/AetherArena \
+            --export-debug "Android" build/AetherArena.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AetherArena-Android-APK
+          path: build/AetherArena.apk
